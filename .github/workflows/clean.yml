@@ -1,0 +1,68 @@
+name: clean
+
+# Deletes the diff pages older than KEEP_DAYS (repository variable, default 90), regenerates index.html and
+# squashes the history into one commit so the deleted pages leave the repository for good.
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Delete pages older than this many days (empty = variable KEEP_DAYS, else 90).
+        required: false
+        default: ""
+      dry-run:
+        description: Only list what would be deleted.
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: clean-diffs
+  cancel-in-progress: false
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the retention
+        id: days
+        env:
+          INPUT_DAYS: ${{ inputs.days }}
+          VAR_DAYS: ${{ vars.KEEP_DAYS }}
+        run: |
+          days="${INPUT_DAYS:-${VAR_DAYS:-90}}"
+          case "${days}" in ''|*[!0-9]*|0) echo "::error::KEEP_DAYS must be a positive integer, got '${days}'"; exit 1 ;; esac
+          echo "days=${days}" >> "${GITHUB_OUTPUT}"
+
+      - name: Delete old pages and rebuild the index
+        id: clean
+        env:
+          DAYS: ${{ steps.days.outputs.days }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          args=("${DAYS}")
+          [ "${DRY_RUN}" != "true" ] || args+=(--dry-run)
+          python3 .github/scripts/clean.py "${args[@]}" 2> "${RUNNER_TEMP}/summary.md"
+          cat "${RUNNER_TEMP}/summary.md" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Squash the history
+        if: steps.clean.outputs.deleted != '0' && inputs.dry-run != true
+        env:
+          DAYS: ${{ steps.days.outputs.days }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "diffs-clean-bot"
+          git config user.email "diffs-clean-bot@users.noreply.github.com"
+          git checkout --orphan clean-tmp
+          git add -A
+          git commit --quiet -m "Clean diffs older than ${DAYS} days"
+          git push --force origin "HEAD:${BRANCH}"
